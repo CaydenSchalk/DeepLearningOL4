@@ -20,15 +20,18 @@ from pathlib import Path
 import argparse
 import os
 import urllib
+import random
+from torch.nn.utils.rnn import pad_sequence
 
 HERE = Path(__file__).resolve().parent
 EXPERIMENT = Path(__file__).name
-PROJECT = "OL4-Translation"
 
-USE_RNN = True
+USE_RNN = False
 USE_CUSTOM = False
 PARITY_PROBLEM = False
 SILENT = False
+
+PROJECT = "OL4-Parity" if PARITY_PROBLEM else "OL4-Translation"
 
 output_context = (
     contextlib.redirect_stdout(open(os.devnull, "w"))
@@ -43,6 +46,7 @@ error_context = (
 )
 
 torch.set_float32_matmul_precision('medium')
+
 
 class CharacterTranslationDataModule(pl.LightningDataModule):
     def __init__(self,
@@ -149,6 +153,87 @@ class CharacterTranslationDataModule(pl.LightningDataModule):
                                            shuffle=False)
 
 
+class ParityDataModule(pl.LightningDataModule):
+    def __init__(self,
+                 batch_size=100,
+                 n_sequences=1000,
+                 min_len=10,
+                 max_len=30,
+                 val_split=0.2,
+                 num_workers=4,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.batch_size = batch_size
+        self.n_sequences = n_sequences
+        self.min_len = min_len
+        self.max_len = max_len
+        self.val_split = val_split
+        self.num_workers = num_workers
+        self.i_to_c_src = ['', '<START>', '<STOP>', '0', '1']
+        self.i_to_c_dst = ['', '<START>', '<STOP>', '0', '1']
+        self.data_train = None
+        self.data_val = None
+        self.data_test = None
+
+    def collate_fn(self, batch):
+        enc_x, dec_x, dec_y = zip(*batch)
+        return (pad_sequence(enc_x, batch_first=True, padding_value=0),
+                pad_sequence(dec_x, batch_first=True, padding_value=0),
+                pad_sequence(dec_y, batch_first=True, padding_value=0))
+
+    def setup(self, stage: str = None):
+        if not (self.data_train and self.data_val and self.data_test):
+            data = []
+            for _ in range(self.n_sequences):
+                length = random.randint(self.min_len, self.max_len)
+                bits = [random.randint(0, 1) for _ in range(length)]
+
+                cur, parity = 0, []
+                for b in bits:
+                    cur = (cur + b) % 2
+                    parity.append(cur)
+
+                src = [1] + [b + 3 for b in bits] + [2]
+                dst = [1] + [p + 3 for p in parity] + [2]
+
+                data.append((torch.tensor(src, dtype=torch.long),
+                             torch.tensor(dst[:-1], dtype=torch.long),
+                             torch.tensor(dst[1:], dtype=torch.long)))
+
+            split_point = int(len(data) * (1.0 - self.val_split))
+            self.data_train = data[:split_point]
+            self.data_val = data[split_point:]
+            self.data_test = self.data_val
+
+    def train_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_train,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           collate_fn=self.collate_fn,
+                                           shuffle=True)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_val,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           collate_fn=self.collate_fn,
+                                           shuffle=False)
+
+    def test_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_test,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           collate_fn=self.collate_fn,
+                                           shuffle=False)
+
+    def predict_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_test,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           collate_fn=self.collate_fn,
+                                           shuffle=False)
+
+
 class RecurrentResidual(pl.LightningModule):
     def __init__(self,
                  latent_size = 64,
@@ -156,7 +241,18 @@ class RecurrentResidual(pl.LightningModule):
                  **kwargs):
         super().__init__(**kwargs)
         self.layer_norm = torch.nn.LayerNorm(latent_size)
-        self.rnn_layer = torch.nn.LSTM(latent_size, latent_size, bidirectional=bidirectional, batch_first=True)
+        hidden_size = latent_size // 2 if bidirectional else latent_size
+        if USE_RNN:
+            self.rnn_layer = torch.nn.RNN(latent_size,
+                                          hidden_size,
+                                          bidirectional=bidirectional,
+                                          batch_first=True)
+        else:
+            self.rnn_layer = torch.nn.LSTM(latent_size,
+                                           hidden_size,
+                                           bidirectional=bidirectional,
+                                           batch_first=True)
+
     def forward(self, x):
         return x + self.rnn_layer(self.layer_norm(x))[0]
 
@@ -166,6 +262,7 @@ class EncoderNetwork(pl.LightningModule):
                  num_tokens,
                  latent_size = 64, # Use something divisible by 2
                  n_layers = 8,
+                 bidirectional = False,
                  **kwargs):
         super().__init__(**kwargs)
         self.embedding = torch.nn.Embedding(num_tokens,
@@ -173,7 +270,7 @@ class EncoderNetwork(pl.LightningModule):
                                             padding_idx=0)
         self.dropout = torch.nn.Dropout1d(0.1) # Whole token dropped
         self.rnn_layers = torch.nn.Sequential(*[
-            RecurrentResidual(latent_size, False) for _ in range(n_layers)
+            RecurrentResidual(latent_size, bidirectional) for _ in range(n_layers)
         ])
 
     def forward(self, x):
@@ -182,6 +279,7 @@ class EncoderNetwork(pl.LightningModule):
         y = self.dropout(y)
         y = self.rnn_layers(y)[:,-1]
         return y
+
 
 class DecoderNetwork(pl.LightningModule):
     def __init__(self,
@@ -212,6 +310,7 @@ class DecoderNetwork(pl.LightningModule):
         y = self.rnn_layers(y)
         y = self.output_layer(y)
         return y
+
 
 # Define Trainable Module (Abstract Base Class)
 class EncDecLightningBoilerplate(pl.LightningModule):
@@ -265,6 +364,7 @@ class EncDecLightningBoilerplate(pl.LightningModule):
         self.log('test_loss', loss, on_step=False, on_epoch=True)
         return loss
 
+
 # Attach loss, metrics, and optimizer
 class EncDecLightningModule(EncDecLightningBoilerplate):
     def __init__(self,
@@ -289,6 +389,7 @@ class EncDecLightningModule(EncDecLightningBoilerplate):
         optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
         return optimizer
 
+
 class EncDecNetwork(EncDecLightningModule):
     def __init__(self,
                  num_enc_tokens,
@@ -298,11 +399,12 @@ class EncDecNetwork(EncDecLightningModule):
                  **kwargs):
         super().__init__(num_classes=num_dec_tokens,
                          **kwargs)
-        self.enc_net = EncoderNetwork(num_enc_tokens,latent_size,n_layers)
-        self.dec_net = DecoderNetwork(num_dec_tokens,latent_size,n_layers)
+        self.enc_net = EncoderNetwork(num_enc_tokens, latent_size, n_layers)
+        self.dec_net = DecoderNetwork(num_dec_tokens, latent_size, n_layers)
 
     def forward(self, x_enc, x_dec):
         return self.dec_net(self.enc_net(x_enc), x_dec)
+
 
 def main():
     parser = argparse.ArgumentParser()
@@ -324,7 +426,12 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = args.output_dir / 'runs' / EXPERIMENT
     run_dir.mkdir(parents=True, exist_ok=True)
-    data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers)
+
+    if PARITY_PROBLEM:
+        data_module = ParityDataModule(num_workers=args.workers)
+    else:
+        data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers)
+
     data_module.setup('validate')
 
     for run in range(args.runs):
@@ -333,7 +440,8 @@ def main():
             pl.seed_everything(args.seed + run, workers=True, verbose=False)
 
             model = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
-                                  num_dec_tokens=len(data_module.i_to_c_dst), n_layers=args.n_layers)
+                                  num_dec_tokens=len(data_module.i_to_c_dst),
+                                  n_layers=args.n_layers)
 
             logger = pl.loggers.CSVLogger(str(run_dir / "logs"), name=f'run-{run + 1:02d}')
             wandb_logger = pl.loggers.WandbLogger(
