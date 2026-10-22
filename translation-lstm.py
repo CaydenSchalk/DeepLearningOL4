@@ -157,7 +157,6 @@ class RecurrentResidual(pl.LightningModule):
         super().__init__(**kwargs)
         self.layer_norm = torch.nn.LayerNorm(latent_size)
         self.rnn_layer = torch.nn.LSTM(latent_size, latent_size, bidirectional=bidirectional, batch_first=True)
-
     def forward(self, x):
         return x + self.rnn_layer(self.layer_norm(x))[0]
 
@@ -174,7 +173,7 @@ class EncoderNetwork(pl.LightningModule):
                                             padding_idx=0)
         self.dropout = torch.nn.Dropout1d(0.1) # Whole token dropped
         self.rnn_layers = torch.nn.Sequential(*[
-            RecurrentResidual(latent_size,True) for _ in range(n_layers)
+            RecurrentResidual(latent_size, False) for _ in range(n_layers)
         ])
 
     def forward(self, x):
@@ -316,6 +315,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--workers', type=int, default=0)
+    parser.add_argument('--n_layers', type=int, default=8)
     parser.add_argument('--data-dir', type=Path, default=HERE / 'datasets')
     parser.add_argument('--output-dir', type=Path, default=HERE)
 
@@ -333,7 +333,7 @@ def main():
             pl.seed_everything(args.seed + run, workers=True, verbose=False)
 
             model = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
-                                  num_dec_tokens=len(data_module.i_to_c_dst))
+                                  num_dec_tokens=len(data_module.i_to_c_dst), n_layers=args.n_layers)
 
             logger = pl.loggers.CSVLogger(str(run_dir / "logs"), name=f'run-{run + 1:02d}')
             wandb_logger = pl.loggers.WandbLogger(
