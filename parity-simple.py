@@ -277,7 +277,8 @@ class EncoderNetwork(pl.LightningModule):
         y = x
         y = self.embedding(y)
         y = self.dropout(y)
-        y = self.rnn_layers(y)[:,-1]
+        y = self.rnn_layers(y)
+        y = y[torch.arange(y.shape[0], device=y.device), (x != 0).sum(1) - 1]
         return y
 
 
@@ -411,12 +412,13 @@ def main():
 
     os.environ["WANDB_SILENT"] = "true"
     os.environ["WANDB_CONSOLE"] = "off"
-    all_acc, all_loss = [], []
+    all_acc, all_loss, all_test_acc = [], [], []
 
     parser.add_argument('--runs', type=int, default=5)
     parser.add_argument('--epochs', type=int, default=50)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--workers', type=int, default=0)
+    parser.add_argument('--batch_size', type=int, default=100)
     parser.add_argument('--n_layers', type=int, default=8)
     parser.add_argument('--data-dir', type=Path, default=HERE / 'datasets')
     parser.add_argument('--output-dir', type=Path, default=HERE)
@@ -427,17 +429,17 @@ def main():
     run_dir = args.output_dir / 'runs' / EXPERIMENT
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    if PARITY_PROBLEM:
-        data_module = ParityDataModule(num_workers=args.workers)
-    else:
-        data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers)
-
-    data_module.setup('validate')
-
     for run in range(args.runs):
 
         with output_context, error_context:
             pl.seed_everything(args.seed + run, workers=True, verbose=False)
+
+            if PARITY_PROBLEM:
+                data_module = ParityDataModule(num_workers=args.workers, batch_size=args.batch_size)
+            else:
+                data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers, batch_size=args.batch_size)
+
+            data_module.setup('validate')
 
             model = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
                                   num_dec_tokens=len(data_module.i_to_c_dst),
@@ -473,16 +475,20 @@ def main():
 
         results = pd.read_csv(logger.log_dir+"/metrics.csv", delimiter=',')
 
-        print("Validation accuracy:", *["%.8f"%(x) for x in
-                                        results['val_acc'][np.logical_not(np.isnan(results["val_acc"]))]])
-        print("Validation loss:", *["%.8f"%(x) for x in
-                                    results['val_loss'][np.logical_not(np.isnan(results["val_loss"]))]])
-        print("Test accuracy:", *["%.8f"%(x['test_acc']) for x in test_results])
+        print("Validation accuracy - TF:", *["%.8f" % (x) for x in
+                                             results['val_acc'][np.logical_not(np.isnan(results["val_acc"]))]])
+        print("Validation loss - TF: ", *["%.8f" % (x) for x in
+                                          results['val_loss'][np.logical_not(np.isnan(results["val_loss"]))]])
+        print("Validation accuracy - NO TF", *["%.8f" % (x['test_acc']) for x in test_results])
 
         accuracy = results['val_acc'][np.logical_not(np.isnan(results['val_acc']))].to_numpy()
         loss = results['val_loss'][np.logical_not(np.isnan(results['val_loss']))].to_numpy()
         all_acc.append(accuracy)
         all_loss.append(loss)
+        all_test_acc.append(test_results[0]['test_acc'])
+
+    print("Final validation accuracy: NO TF - across all runs: "
+          "%.4f +/- %.4f" % (np.mean(all_test_acc), np.std(all_test_acc)))
 
     for metric, curves in [('acc', all_acc), ('loss', all_loss)]:
         target = args.output_dir / f'{EXPERIMENT}-{metric}-results.txt'
