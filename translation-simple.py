@@ -336,7 +336,7 @@ def main():
 
             logger = pl.loggers.CSVLogger(str(run_dir / "logs"), name=f'run-{run + 1:02d}')
             wandb_logger = pl.loggers.WandbLogger(
-                project="OL4-Translation", name=f'{EXPERIMENT}-run{run + 1}',
+                project=PROJECT, name=f'{EXPERIMENT}-run{run + 1}',
                 group=EXPERIMENT, save_dir=str(run_dir)
             )
 
