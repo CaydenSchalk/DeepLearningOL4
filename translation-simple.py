@@ -8,6 +8,10 @@ from torchview import draw_graph
 import pandas as pd
 import matplotlib.pyplot as plt
 
+USE_RNN = True
+USE_CUSTOM = False
+PARITY_PROBLEM = False
+
 torch.set_float32_matmul_precision('medium')
 
 print("GPU is present:",torch.cuda.is_available())
@@ -123,7 +127,7 @@ class CharacterTranslationDataModule(pl.LightningDataModule):
                                            num_workers=self.num_workers,
                                            shuffle=False)
 
-data_module = CharacterTranslationDataModule()
+data_module = CharacterTranslationDataModule(n_sequences=None)
 data_module.setup('validate')
 dl = data_module.val_dataloader()
 
@@ -134,10 +138,7 @@ class RecurrentResidual(pl.LightningModule):
                  **kwargs):
         super().__init__(**kwargs)
         self.layer_norm = torch.nn.LayerNorm(latent_size)
-        self.rnn_layer = torch.nn.LSTM(latent_size,
-                                       latent_size // 2 if bidirectional else latent_size,
-                                       bidirectional=bidirectional,
-                                       batch_first=True)
+        self.rnn_layer = torch.nn.RNN(latent_size, latent_size, batch_first=True)
     def forward(self, x):
         return x + self.rnn_layer(self.layer_norm(x))[0]
 
@@ -165,10 +166,156 @@ class EncoderNetwork(pl.LightningModule):
         return y
 
 
-enc_net = EncoderNetwork(num_tokens=len(data_module.i_to_c_src))
+# enc_net = EncoderNetwork(num_tokens=len(data_module.i_to_c_src))
 
 batch = next(iter(dl))
 
-summary(enc_net,
-        input_size=batch[0].shape,
-        dtypes=[torch.long])
+# summary(enc_net,
+#         input_size=batch[0].shape,
+#         dtypes=[torch.long])
+
+class DecoderNetwork(pl.LightningModule):
+    def __init__(self,
+                 num_tokens,
+                 latent_size = 64, # Use something divisible by 2
+                 n_layers = 8,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.embedding = torch.nn.Embedding(num_tokens,
+                                            latent_size,
+                                            padding_idx=0)
+        self.dropout = torch.nn.Dropout1d(0.1) # Whole token dropped
+        self.linear = torch.nn.Linear(latent_size*2,
+                                      latent_size)
+        self.rnn_layers = torch.nn.Sequential(*[
+            RecurrentResidual(latent_size,False) for _ in range(n_layers)
+        ])
+        self.output_layer = torch.nn.Linear(latent_size,
+                                            num_tokens)
+
+    def forward(self, x_enc, x_dec):
+        y_enc = x_enc.unsqueeze(1).repeat(1,x_dec.shape[1],1)
+        y_dec = self.embedding(x_dec)
+        y_dec = self.dropout(y_dec)
+        y = y_enc
+        y = torch.concatenate([y_enc,y_dec],-1)
+        y = self.linear(y)
+        y = self.rnn_layers(y)
+        y = self.output_layer(y)
+        return y
+
+# dec_net = DecoderNetwork(num_tokens=len(data_module.i_to_c_dst))
+#
+# summary(dec_net,input_data=[enc_net(batch[0].to(enc_net.device)).to(dec_net.device),
+#                             batch[1]])
+
+# Define Trainable Module (Abstract Base Class)
+class EncDecLightningBoilerplate(pl.LightningModule):
+    def __init__(self, **kwargs):
+        # This is the contructor, where we typically make
+        # layer objects using provided arguments.
+        super().__init__(**kwargs) # Call the super class constructor
+
+    def predict_step(self, predict_batch, batch_idx):
+        x_enc, x_dec, y_dec = predict_batch
+        y_pred = self.predict(x_enc, x_dec)
+        return y_pred, y_dec
+
+    def training_step(self, train_batch, batch_idx):
+        x_enc, x_dec, y_dec = train_batch
+        y_pred = self(x_enc, x_dec)
+        perm = (0,-1) + tuple(range(y_pred.ndim))[1:-1]
+        for metric_name, metric_function in self.network_metrics.items():
+            metric_value = metric_function(y_pred.permute(*perm),y_dec)
+            self.log('train_'+metric_name, metric_value, on_step=False, on_epoch=True)
+        loss = self.network_loss(y_pred.permute(*perm),y_dec)
+        self.log('train_loss', loss, on_step=False, on_epoch=True)
+        return loss
+
+    # Validate used for Teacher Forcing
+    def validation_step(self, val_batch, batch_idx):
+        x_enc, x_dec, y_dec = val_batch
+        y_pred = self(x_enc, x_dec)
+        perm = (0,-1) + tuple(range(y_pred.ndim))[1:-1]
+        for metric_name, metric_function in self.network_metrics.items():
+            metric_value = metric_function(y_pred.permute(*perm),y_dec)
+            self.log('val_'+metric_name, metric_value, on_step=False, on_epoch=True)
+        loss = self.network_loss(y_pred.permute(*perm),y_dec)
+        self.log('val_loss', loss, on_step=False, on_epoch=True)
+        return loss
+
+    # Test used for Non-Teacher Forcing
+    def test_step(self, test_batch, batch_idx):
+        x_enc, x_dec, y_dec = test_batch
+        context = self.enc_net(x_enc)
+        tokens = torch.zeros_like(x_dec).long()
+        tokens[:,0] = 1
+        for i in range(y_dec.shape[1]-1):
+            tokens[:,i+1] = self.dec_net(context, tokens).argmax(-1)[:,i]
+        y_pred = self(x_enc, tokens)
+        perm = (0,-1) + tuple(range(y_pred.ndim))[1:-1]
+        for metric_name, metric_function in self.network_metrics.items():
+            metric_value = metric_function(y_pred.permute(*perm),y_dec)
+            self.log('test_'+metric_name, metric_value, on_step=False, on_epoch=True)
+        loss = self.network_loss(y_pred.permute(*perm),y_dec)
+        self.log('test_loss', loss, on_step=False, on_epoch=True)
+        return loss
+
+# Attach loss, metrics, and optimizer
+class EncDecLightningModule(EncDecLightningBoilerplate):
+    def __init__(self,
+                 num_classes,
+                 ignore_index=0,
+                 **kwargs):
+        # This is the contructor, where we typically make
+        # layer objects using provided arguments.
+        super().__init__(**kwargs) # Call the super class constructor
+        self.num_classes = num_classes
+
+        # This creates an accuracy function
+        self.network_metrics = torch.nn.ModuleDict({
+            'acc': torchmetrics.classification.Accuracy(task='multiclass',
+                                                        num_classes=num_classes,
+                                                        ignore_index=ignore_index)
+        })
+        # This creates a loss function
+        self.network_loss = torch.nn.CrossEntropyLoss(ignore_index=0)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
+        return optimizer
+
+class EncDecNetwork(EncDecLightningModule):
+    def __init__(self,
+                 num_enc_tokens,
+                 num_dec_tokens,
+                 latent_size = 64, # Use something divisible by 2
+                 n_layers = 8,
+                 **kwargs):
+        super().__init__(num_classes=num_dec_tokens,
+                         **kwargs)
+        self.enc_net = EncoderNetwork(num_enc_tokens,latent_size,n_layers)
+        self.dec_net = DecoderNetwork(num_dec_tokens,latent_size,n_layers)
+
+    def forward(self, x_enc, x_dec):
+        return self.dec_net(self.enc_net(x_enc), x_dec)
+
+enc_dec_net = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
+                            num_dec_tokens=len(data_module.i_to_c_dst))
+summary(enc_dec_net,input_data=[batch[0].to(enc_dec_net.device),
+                                batch[1].to(enc_dec_net.device)])
+
+logger = pl.loggers.CSVLogger("logs",
+                              name="Demo-10",
+                              version="character-eng-to-por")
+
+trainer = pl.Trainer(logger=logger,
+                     max_epochs=300,
+                     enable_progress_bar=True,
+                     enable_checkpointing=False,
+                     log_every_n_steps=0,
+                     callbacks=[pl.callbacks.RichProgressBar(refresh_rate=50)])
+
+trainer.fit(enc_dec_net, data_module)
+
+trainer.test(enc_dec_net, data_module)
