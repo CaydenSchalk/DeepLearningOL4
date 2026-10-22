@@ -20,6 +20,7 @@ from pathlib import Path
 import argparse
 import os
 import urllib
+from torch.nn.utils.rnn import pad_sequence
 
 HERE = Path(__file__).resolve().parent
 EXPERIMENT = Path(__file__).name
@@ -148,6 +149,74 @@ class CharacterTranslationDataModule(pl.LightningDataModule):
                                            num_workers=self.num_workers,
                                            shuffle=False)
 
+class ParityDataModule(pl.LightningDataModule):
+    def __init__(self,
+                 batch_size=100,
+                 n_sequences=1000,
+                 min_len=10,
+                 max_len=30,
+                 val_split=0.2,
+                 num_workers=4,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.batch_size = batch_size
+        self.n_sequences = n_sequences
+        self.min_len = min_len
+        self.max_len = max_len
+        self.val_split = val_split
+        self.num_workers = num_workers
+        self.data_train = None
+        self.data_val = None
+        self.data_test = None
+
+    def collate_fn(self, batch):
+        sequences, labels = zip(*batch)
+        padded_sequences = pad_sequence(sequences, batch_first=True, padding_value=2)
+        labels = torch.stack(labels)
+        return padded_sequences, labels
+
+    def setup(self, stage: str = None):
+        if not (self.data_train and self.data_val and self.data_test):
+            data = []
+            for _ in range(self.n_sequences):
+                length = random.randint(self.min_len, self.max_len)
+                bits = [random.randint(0, 1) for _ in range(length)]
+                parity = sum(bits) % 2
+                data.append((torch.tensor(bits, dtype=torch.long),
+                             torch.tensor([parity], dtype=torch.float32)))
+
+            split_point = int(len(data) * (1.0 - self.val_split))
+            self.data_train = data[:split_point]
+            self.data_val = data[split_point:]
+            self.data_test = self.data_val
+
+    def train_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_train,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           collate_fn=self.collate_fn,
+                                           shuffle=True)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_val,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           collate_fn=self.collate_fn,
+                                           shuffle=False)
+
+    def test_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_test,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           collate_fn=self.collate_fn,
+                                           shuffle=False)
+
+    def predict_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_test,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           collate_fn=self.collate_fn,
+                                           shuffle=False)
 
 class RecurrentResidual(pl.LightningModule):
     def __init__(self,
@@ -323,7 +392,12 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = args.output_dir / 'runs' / EXPERIMENT
     run_dir.mkdir(parents=True, exist_ok=True)
-    data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers)
+
+    if PARITY_PROBLEM:
+        data_module = ParityDataModule(num_workers=args.workers)
+    else:
+        data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers)
+
     data_module.setup('validate')
 
     for run in range(args.runs):
