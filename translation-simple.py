@@ -20,6 +20,7 @@ from pathlib import Path
 import argparse
 import os
 import urllib
+import random
 from torch.nn.utils.rnn import pad_sequence
 
 HERE = Path(__file__).resolve().parent
@@ -149,6 +150,8 @@ class CharacterTranslationDataModule(pl.LightningDataModule):
                                            num_workers=self.num_workers,
                                            shuffle=False)
 
+
+
 class ParityDataModule(pl.LightningDataModule):
     def __init__(self,
                  batch_size=100,
@@ -165,15 +168,17 @@ class ParityDataModule(pl.LightningDataModule):
         self.max_len = max_len
         self.val_split = val_split
         self.num_workers = num_workers
+        self.i_to_c_src = ['', '<START>', '<STOP>', '0', '1']
+        self.i_to_c_dst = ['', '<START>', '<STOP>', '0', '1']
         self.data_train = None
         self.data_val = None
         self.data_test = None
 
     def collate_fn(self, batch):
-        sequences, labels = zip(*batch)
-        padded_sequences = pad_sequence(sequences, batch_first=True, padding_value=2)
-        labels = torch.stack(labels)
-        return padded_sequences, labels
+        enc_x, dec_x, dec_y = zip(*batch)
+        return (pad_sequence(enc_x, batch_first=True, padding_value=0),
+                pad_sequence(dec_x, batch_first=True, padding_value=0),
+                pad_sequence(dec_y, batch_first=True, padding_value=0))
 
     def setup(self, stage: str = None):
         if not (self.data_train and self.data_val and self.data_test):
@@ -181,9 +186,18 @@ class ParityDataModule(pl.LightningDataModule):
             for _ in range(self.n_sequences):
                 length = random.randint(self.min_len, self.max_len)
                 bits = [random.randint(0, 1) for _ in range(length)]
-                parity = sum(bits) % 2
-                data.append((torch.tensor(bits, dtype=torch.long),
-                             torch.tensor([parity], dtype=torch.float32)))
+
+                cur, parity = 0, []
+                for b in bits:
+                    cur = (cur + b) % 2
+                    parity.append(cur)
+
+                src = [1] + [b + 3 for b in bits] + [2]
+                dst = [1] + [p + 3 for p in parity] + [2]
+
+                data.append((torch.tensor(src, dtype=torch.long),
+                             torch.tensor(dst[:-1], dtype=torch.long),
+                             torch.tensor(dst[1:], dtype=torch.long)))
 
             split_point = int(len(data) * (1.0 - self.val_split))
             self.data_train = data[:split_point]
