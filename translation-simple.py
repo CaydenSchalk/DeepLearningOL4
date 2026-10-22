@@ -1,16 +1,44 @@
 import numpy as np
 import torch
+import torch.nn as nn
 import lightning.pytorch as pl
 import torchmetrics
 import torchvision
 from torchinfo import summary
 from torchview import draw_graph
+from IPython.display import display
+import sympy as sp
+sp.init_printing(use_latex=True)
+import contextlib
 import pandas as pd
 import matplotlib.pyplot as plt
+import logging
+import wandb
+import json
+import warnings
+from pathlib import Path
+import argparse
+import os
+
+EXPERIMENT = Path(__file__).name
+PROJECT = "OL3-Custom"
 
 USE_RNN = True
 USE_CUSTOM = False
 PARITY_PROBLEM = False
+SILENT = False
+
+output_context = (
+    contextlib.redirect_stdout(open(os.devnull, "w"))
+    if SILENT
+    else contextlib.nullcontext()
+)
+
+error_context = (
+    contextlib.redirect_stderr(open(os.devnull, "w"))
+    if SILENT
+    else contextlib.nullcontext()
+)
 
 torch.set_float32_matmul_precision('medium')
 
@@ -319,3 +347,84 @@ trainer = pl.Trainer(logger=logger,
 trainer.fit(enc_dec_net, data_module)
 
 trainer.test(enc_dec_net, data_module)
+
+def main():
+    parser = argparse.ArgumentParser()
+
+    os.environ["WANDB_SILENT"] = "true"
+    os.environ["WANDB_CONSOLE"] = "off"
+    all_acc, all_loss = [], []
+
+    parser.add_argument('--runs', type=int, default=5)
+    parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--workers', type=int, default=0)
+    parser.add_argument('--data-dir', type=Path, default=HERE / 'datasets')
+    parser.add_argument('--output-dir', type=Path, default=HERE)
+
+    args = parser.parse_args()
+
+    args.output_dir.mkdir(parents=True, exist_ok=True)
+    run_dir = args.output_dir / 'runs' / EXPERIMENT
+    run_dir.mkdir(parents=True, exist_ok=True)
+    data_module = CIFAR10DataModule()
+    data_module.setup('validate')
+
+    for run in range(args.runs):
+
+        with output_context, error_context:
+            pl.seed_everything(args.seed + run, workers=True, verbose=False)
+
+            model = ResNet50(input_shape=data_module.input_shape,
+                             output_shape=data_module.output_shape, network_type=TYPE)
+
+            summary(model)
+
+            logger = pl.loggers.CSVLogger(str(run_dir / "logs"), name=f'run-{run + 1:02d}')
+            wandb_logger = pl.loggers.WandbLogger(
+                project=PROJECT, name=f'{EXPERIMENT}-run{run + 1}',
+                group=EXPERIMENT, save_dir=str(run_dir)
+            )
+
+            loggers = []
+            loggers.append(wandb_logger)
+            loggers.append(logger)
+            configuration = {
+                'experiment': EXPERIMENT, 'runs': args.runs, 'epochs': args.epochs,
+                'seed': args.seed, 'split_seed': 0, 'batch_size': 128,
+                'custom': CUSTOM, 'data_dir': str(args.data_dir.resolve()),
+            }
+
+            configuration = json.loads(json.dumps(configuration))
+            wandb_logger.log_hyperparams({**configuration, 'run': run + 1,
+                                          'run_seed': args.seed + run})
+            trainer = pl.Trainer(max_epochs=50,logger=loggers,
+                                 enable_progress_bar=True,
+                                 enable_checkpointing=False,
+                                 log_every_n_steps=0,
+                                 callbacks=[pl.callbacks.RichProgressBar(refresh_rate=20)])
+
+
+
+            # result = trainer.validate(model, dataloaders=data_module)
+
+            trainer.fit(model, data_module)
+            # result = trainer.validate(model, data_module)
+            wandb.finish()
+
+        results = pd.read_csv(logger.log_dir+"/metrics.csv",delimiter=',')
+
+        print("Validation accuracy:",*["%.8f"%(x) for x in
+                                       results['val_acc'][np.logical_not(np.isnan(results["val_acc"]))]])
+        print("Validation loss:",*["%.8f"%(x) for x in
+                                   results['val_loss'][np.logical_not(np.isnan(results["val_loss"]))]])
+
+        accuracy = results['val_acc'][np.logical_not(np.isnan(results['val_acc']))].to_numpy()
+        loss = results['val_loss'][np.logical_not(np.isnan(results['val_loss']))].to_numpy()
+        all_acc.append(accuracy)
+        all_loss.append(loss)
+
+    # grab everything after it's finished
+    for metric, curves in [('acc', all_acc), ('loss', all_loss)]:
+        target = args.output_dir / f'{EXPERIMENT}-{metric}-results.txt'
+        np.savetxt(target, np.array(curves), fmt='%.8f')
