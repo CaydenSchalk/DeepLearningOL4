@@ -20,8 +20,9 @@ from pathlib import Path
 import argparse
 import os
 
+HERE = Path(__file__).resolve().parent
 EXPERIMENT = Path(__file__).name
-PROJECT = "OL3-Custom"
+PROJECT = "OL4-Translation"
 
 USE_RNN = True
 USE_CUSTOM = False
@@ -155,9 +156,9 @@ class CharacterTranslationDataModule(pl.LightningDataModule):
                                            num_workers=self.num_workers,
                                            shuffle=False)
 
-data_module = CharacterTranslationDataModule(n_sequences=None)
-data_module.setup('validate')
-dl = data_module.val_dataloader()
+# data_module = CharacterTranslationDataModule(n_sequences=None)
+# data_module.setup('validate')
+# dl = data_module.val_dataloader()
 
 class RecurrentResidual(pl.LightningModule):
     def __init__(self,
@@ -196,7 +197,7 @@ class EncoderNetwork(pl.LightningModule):
 
 # enc_net = EncoderNetwork(num_tokens=len(data_module.i_to_c_src))
 
-batch = next(iter(dl))
+# batch = next(iter(dl))
 
 # summary(enc_net,
 #         input_size=batch[0].shape,
@@ -328,25 +329,25 @@ class EncDecNetwork(EncDecLightningModule):
     def forward(self, x_enc, x_dec):
         return self.dec_net(self.enc_net(x_enc), x_dec)
 
-enc_dec_net = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
-                            num_dec_tokens=len(data_module.i_to_c_dst))
-summary(enc_dec_net,input_data=[batch[0].to(enc_dec_net.device),
-                                batch[1].to(enc_dec_net.device)])
-
-logger = pl.loggers.CSVLogger("logs",
-                              name="Demo-10",
-                              version="character-eng-to-por")
-
-trainer = pl.Trainer(logger=logger,
-                     max_epochs=300,
-                     enable_progress_bar=True,
-                     enable_checkpointing=False,
-                     log_every_n_steps=0,
-                     callbacks=[pl.callbacks.RichProgressBar(refresh_rate=50)])
-
-trainer.fit(enc_dec_net, data_module)
-
-trainer.test(enc_dec_net, data_module)
+# enc_dec_net = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
+#                             num_dec_tokens=len(data_module.i_to_c_dst))
+# summary(enc_dec_net,input_data=[batch[0].to(enc_dec_net.device),
+#                                 batch[1].to(enc_dec_net.device)])
+#
+# logger = pl.loggers.CSVLogger("logs",
+#                               name="Demo-10",
+#                               version="character-eng-to-por")
+#
+# trainer = pl.Trainer(logger=logger,
+#                      max_epochs=300,
+#                      enable_progress_bar=True,
+#                      enable_checkpointing=False,
+#                      log_every_n_steps=0,
+#                      callbacks=[pl.callbacks.RichProgressBar(refresh_rate=50)])
+#
+# trainer.fit(enc_dec_net, data_module)
+#
+# trainer.test(enc_dec_net, data_module)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -367,7 +368,7 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     run_dir = args.output_dir / 'runs' / EXPERIMENT
     run_dir.mkdir(parents=True, exist_ok=True)
-    data_module = CIFAR10DataModule()
+    data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers)
     data_module.setup('validate')
 
     for run in range(args.runs):
@@ -375,14 +376,12 @@ def main():
         with output_context, error_context:
             pl.seed_everything(args.seed + run, workers=True, verbose=False)
 
-            model = ResNet50(input_shape=data_module.input_shape,
-                             output_shape=data_module.output_shape, network_type=TYPE)
-
-            summary(model)
+            model = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
+                                  num_dec_tokens=len(data_module.i_to_c_dst))
 
             logger = pl.loggers.CSVLogger(str(run_dir / "logs"), name=f'run-{run + 1:02d}')
             wandb_logger = pl.loggers.WandbLogger(
-                project=PROJECT, name=f'{EXPERIMENT}-run{run + 1}',
+                project="OL4-Translation", name=f'{EXPERIMENT}-run{run + 1}',
                 group=EXPERIMENT, save_dir=str(run_dir)
             )
 
@@ -391,40 +390,40 @@ def main():
             loggers.append(logger)
             configuration = {
                 'experiment': EXPERIMENT, 'runs': args.runs, 'epochs': args.epochs,
-                'seed': args.seed, 'split_seed': 0, 'batch_size': 128,
-                'custom': CUSTOM, 'data_dir': str(args.data_dir.resolve()),
+                'seed': args.seed, 'split_seed': 0, 'batch_size': data_module.batch_size,
+                'custom': USE_CUSTOM, 'data_dir': str(args.data_dir.resolve()),
             }
 
             configuration = json.loads(json.dumps(configuration))
             wandb_logger.log_hyperparams({**configuration, 'run': run + 1,
                                           'run_seed': args.seed + run})
-            trainer = pl.Trainer(max_epochs=50,logger=loggers,
+            trainer = pl.Trainer(max_epochs=args.epochs, logger=loggers,
                                  enable_progress_bar=True,
                                  enable_checkpointing=False,
                                  log_every_n_steps=0,
                                  callbacks=[pl.callbacks.RichProgressBar(refresh_rate=20)])
 
-
-
-            # result = trainer.validate(model, dataloaders=data_module)
-
             trainer.fit(model, data_module)
-            # result = trainer.validate(model, data_module)
+            test_results = trainer.test(model, data_module)
             wandb.finish()
 
-        results = pd.read_csv(logger.log_dir+"/metrics.csv",delimiter=',')
+        results = pd.read_csv(logger.log_dir+"/metrics.csv", delimiter=',')
 
-        print("Validation accuracy:",*["%.8f"%(x) for x in
-                                       results['val_acc'][np.logical_not(np.isnan(results["val_acc"]))]])
-        print("Validation loss:",*["%.8f"%(x) for x in
-                                   results['val_loss'][np.logical_not(np.isnan(results["val_loss"]))]])
+        print("Validation accuracy:", *["%.8f"%(x) for x in
+                                        results['val_acc'][np.logical_not(np.isnan(results["val_acc"]))]])
+        print("Validation loss:", *["%.8f"%(x) for x in
+                                    results['val_loss'][np.logical_not(np.isnan(results["val_loss"]))]])
+        print("Test accuracy:", *["%.8f"%(x['test_acc']) for x in test_results])
 
         accuracy = results['val_acc'][np.logical_not(np.isnan(results['val_acc']))].to_numpy()
         loss = results['val_loss'][np.logical_not(np.isnan(results['val_loss']))].to_numpy()
         all_acc.append(accuracy)
         all_loss.append(loss)
 
-    # grab everything after it's finished
     for metric, curves in [('acc', all_acc), ('loss', all_loss)]:
         target = args.output_dir / f'{EXPERIMENT}-{metric}-results.txt'
         np.savetxt(target, np.array(curves), fmt='%.8f')
+
+
+if __name__ == '__main__':
+    main()
