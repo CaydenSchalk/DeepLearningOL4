@@ -19,6 +19,7 @@ import warnings
 from pathlib import Path
 import argparse
 import os
+import urllib
 
 HERE = Path(__file__).resolve().parent
 EXPERIMENT = Path(__file__).name
@@ -42,15 +43,6 @@ error_context = (
 )
 
 torch.set_float32_matmul_precision('medium')
-
-print("GPU is present:",torch.cuda.is_available())
-if torch.cuda.is_available():
-    print("GPU Name:",torch.cuda.get_device_name())
-    print("GPU Count:",torch.cuda.device_count())
-    print("GPU Properties:",torch.cuda.get_device_properties())
-
-import urllib
-
 
 class CharacterTranslationDataModule(pl.LightningDataModule):
     def __init__(self,
@@ -156,9 +148,6 @@ class CharacterTranslationDataModule(pl.LightningDataModule):
                                            num_workers=self.num_workers,
                                            shuffle=False)
 
-# data_module = CharacterTranslationDataModule(n_sequences=None)
-# data_module.setup('validate')
-# dl = data_module.val_dataloader()
 
 class RecurrentResidual(pl.LightningModule):
     def __init__(self,
@@ -194,15 +183,6 @@ class EncoderNetwork(pl.LightningModule):
         y = self.rnn_layers(y)[:,-1]
         return y
 
-
-# enc_net = EncoderNetwork(num_tokens=len(data_module.i_to_c_src))
-
-# batch = next(iter(dl))
-
-# summary(enc_net,
-#         input_size=batch[0].shape,
-#         dtypes=[torch.long])
-
 class DecoderNetwork(pl.LightningModule):
     def __init__(self,
                  num_tokens,
@@ -232,11 +212,6 @@ class DecoderNetwork(pl.LightningModule):
         y = self.rnn_layers(y)
         y = self.output_layer(y)
         return y
-
-# dec_net = DecoderNetwork(num_tokens=len(data_module.i_to_c_dst))
-#
-# summary(dec_net,input_data=[enc_net(batch[0].to(enc_net.device)).to(dec_net.device),
-#                             batch[1]])
 
 # Define Trainable Module (Abstract Base Class)
 class EncDecLightningBoilerplate(pl.LightningModule):
@@ -328,26 +303,6 @@ class EncDecNetwork(EncDecLightningModule):
 
     def forward(self, x_enc, x_dec):
         return self.dec_net(self.enc_net(x_enc), x_dec)
-
-# enc_dec_net = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
-#                             num_dec_tokens=len(data_module.i_to_c_dst))
-# summary(enc_dec_net,input_data=[batch[0].to(enc_dec_net.device),
-#                                 batch[1].to(enc_dec_net.device)])
-#
-# logger = pl.loggers.CSVLogger("logs",
-#                               name="Demo-10",
-#                               version="character-eng-to-por")
-#
-# trainer = pl.Trainer(logger=logger,
-#                      max_epochs=300,
-#                      enable_progress_bar=True,
-#                      enable_checkpointing=False,
-#                      log_every_n_steps=0,
-#                      callbacks=[pl.callbacks.RichProgressBar(refresh_rate=50)])
-#
-# trainer.fit(enc_dec_net, data_module)
-#
-# trainer.test(enc_dec_net, data_module)
 
 def main():
     parser = argparse.ArgumentParser()
