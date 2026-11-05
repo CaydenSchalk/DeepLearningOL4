@@ -23,16 +23,19 @@ import urllib
 import random
 from torch.nn.utils.rnn import pad_sequence
 import torch.nn.functional as F
+import tokenizers
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 HERE = Path(__file__).resolve().parent
 EXPERIMENT = Path(__file__).name
 
 USE_RNN = False
+USE_TRANSFORMER = True
 USE_CUSTOM = False
-PARITY_PROBLEM = True
+PARITY_PROBLEM = False
 SILENT = False
 
-PROJECT = "OL4-Parity" if PARITY_PROBLEM else "OL4-Translation"
+PROJECT = "OL5-Parity" if PARITY_PROBLEM else "OL5-Translation"
 
 output_context = (
     contextlib.redirect_stdout(open(os.devnull, "w"))
@@ -77,6 +80,7 @@ class PrefixParityHead(nn.Module):
             loss = loss.mean()
 
         return loss
+
 
 
 class CharacterTranslationDataModule(pl.LightningDataModule):
@@ -451,6 +455,341 @@ class EncDecNetwork(EncDecLightningModule):
             return self.dec_net(context, x_dec), enc_outputs
         return self.dec_net(self.enc_net(x_enc), x_dec)
 
+# OL4 ABOVE
+
+class TokenizedTranslationDataModule(pl.LightningDataModule):
+    def __init__(self,
+                 batch_size = 100,
+                 n_sequences = 1000,
+                 val_split = 0.2,
+                 num_workers = 4,
+                 data_url = "https://raw.githubusercontent.com/luisroque/deep-learning-articles/main/data/eng-por.txt",
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.batch_size = batch_size
+        self.n_sequences = n_sequences
+        self.src_timesteps = None
+        self.dst_timesteps = None
+        self.val_split = val_split
+        self.num_workers = num_workers
+        self.data_url = data_url
+        self.input_shape = None
+        self.output_shape = None
+        self.data_train = None
+        self.data_val = None
+        self.data_test = None
+
+    def encode_seq(self,x,tokenizer,max_length=0):
+        # String to integer
+        x = tokenizer.encode("<START>"+x+"<STOP>").ids
+        x += [0]*(max_length-len(x))
+        return x
+
+    def decode_seq(self,x,tokenizer):
+        return tokenizer.decode(x)
+
+    def setup(self, stage: str):
+        if (stage == 'fit' or \
+            stage == 'validate' or
+            stage == 'test' or \
+            stage == 'predict') and \
+                not(self.data_train and self.data_val and self.data_test):
+            data = []
+            with urllib.request.urlopen(self.data_url) as raw_data:
+                for line in raw_data:
+                    data.append(line.decode("utf-8").split('\t')[0:2])
+            data = np.array(data)
+            # Data is generally sorted by -length- (smaller sentences first)
+            if self.n_sequences is not None:
+                data = data[0:self.n_sequences]
+
+            src = data[:,0]
+            dst = data[:,1]
+
+            unknown_token = "<UNK>"  # token for unknown words
+            special_tokens = [unknown_token, "<START>","<STOP>"]  # special tokens
+
+            self.src_tokenizer = tokenizers.Tokenizer(tokenizers.models.BPE(unk_token=unknown_token))
+            self.src_tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+            src_token_trainer = tokenizers.trainers.BpeTrainer(vocab_size=100000,special_tokens=special_tokens)
+            self.src_tokenizer.train_from_iterator(src,src_token_trainer)
+
+            self.dst_tokenizer = tokenizers.Tokenizer(tokenizers.models.BPE(unk_token=unknown_token))
+            self.dst_tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
+            dst_token_trainer = tokenizers.trainers.BpeTrainer(vocab_size=100000,special_tokens=special_tokens)
+            self.dst_tokenizer.train_from_iterator(dst,dst_token_trainer)
+
+            src_recoded = np.array([self.src_tokenizer.decode(self.src_tokenizer.encode(s).ids) for s in src])
+            dst_recoded = np.array([self.dst_tokenizer.decode(self.dst_tokenizer.encode(s).ids) for s in dst])
+
+            self.src_timesteps = np.max([len(self.encode_seq(i,self.src_tokenizer)) for i in src_recoded])
+            self.dst_timesteps = np.max([len(self.encode_seq(i,self.dst_tokenizer)) for i in dst_recoded])
+
+            X = np.vstack([self.encode_seq(x,self.src_tokenizer,self.src_timesteps) for x in src_recoded])
+            Y = np.vstack([self.encode_seq(x,self.dst_tokenizer,self.dst_timesteps) for x in dst_recoded])
+
+            # Shuffle data for training/validation splits (monte carlo sampling)
+            rng = np.random.default_rng()
+            permutation = rng.permutation(X.shape[0])
+            self.input_shape = X.shape[1:]
+            self.output_shape = Y.shape[1:]
+            split_point = int(X.shape[0]*(1.0-self.val_split))
+
+            enc_x_train = X[permutation[:split_point]]
+            enc_x_val = X[permutation[split_point:]]
+            dec_x_train = Y[permutation[:split_point],0:-1]
+            dec_x_val = Y[permutation[split_point:],0:-1]
+            dec_y_train = Y[permutation[:split_point],1:]
+            dec_y_val = Y[permutation[split_point:],1:]
+            self.data_train = list(zip(torch.Tensor(enc_x_train).to(torch.long),
+                                       torch.Tensor(dec_x_train).to(torch.long),
+                                       torch.Tensor(dec_y_train).to(torch.long)))
+            self.data_val = list(zip(torch.Tensor(enc_x_val).to(torch.long),
+                                     torch.Tensor(dec_x_val).to(torch.long),
+                                     torch.Tensor(dec_y_val).to(torch.long)))
+            self.data_test = self.data_val
+
+    def train_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_train,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           shuffle=True)
+
+    def val_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_val,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           shuffle=False)
+
+    def test_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_test,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           shuffle=False)
+
+    def predict_dataloader(self):
+        return torch.utils.data.DataLoader(self.data_test,
+                                           batch_size=self.batch_size,
+                                           num_workers=self.num_workers,
+                                           shuffle=False)
+
+class SinePositionEmbedding(pl.LightningModule):
+    def __init__(self,
+                 max_wavelength=10000.0,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.max_wavelength = torch.Tensor([max_wavelength])
+
+    def forward(self, x):
+        input_shape = x.shape
+        seq_length = x.shape[-2]
+        hidden_size = x.shape[-1]
+        position = torch.arange(seq_length).type_as(x)
+        min_freq = (1 / self.max_wavelength).type_as(x)
+        timescales = torch.pow(
+            min_freq,
+            (2 * (torch.arange(hidden_size) // 2)).type_as(x)
+            / torch.Tensor([hidden_size]).type_as(x)
+        )
+        angles = torch.unsqueeze(position, 1) * torch.unsqueeze(timescales, 0)
+        cos_mask = (torch.arange(hidden_size) % 2).type_as(x)
+        sin_mask = 1 - cos_mask
+        positional_encodings = (
+                torch.sin(angles) * sin_mask + torch.cos(angles) * cos_mask
+        )
+        return torch.broadcast_to(positional_encodings, input_shape)
+
+class MaskedSinePositionEmbedding(SinePositionEmbedding):
+    def __init__(self,
+                 **kwargs):
+        super().__init__(**kwargs)
+
+    def forward(self,x):
+        return super().forward(x) * torch.abs(torch.sign(x))
+
+class MaskedRandomPositionEmbedding(pl.LightningModule):
+    def __init__(self,
+                 max_length,
+                 latent_size = 64,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.embedding = torch.nn.Embedding(max_length+1,
+                                            latent_size,
+                                            padding_idx=0)
+    def forward(self,x):
+        return self.embedding(torch.arange(1,x.shape[1]+1).unsqueeze(0).type_as(x).long()) * torch.abs(torch.sign(x))
+
+
+class TransformerEncoderNetwork(pl.LightningModule):
+    def __init__(self,
+                 num_tokens,
+                 max_length,
+                 latent_size = 64,
+                 num_heads = 4,
+                 n_layers = 8,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.token_embedding = torch.nn.Embedding(num_tokens,
+                                                  latent_size,
+                                                  padding_idx=0)
+        self.position_embedding = MaskedSinePositionEmbedding()
+        self.transformer_blocks = torch.nn.TransformerEncoder(
+            torch.nn.TransformerEncoderLayer(d_model=latent_size,
+                                             nhead=num_heads,
+                                             dim_feedforward=latent_size*2,
+                                             activation=torch.nn.GELU(),
+                                             batch_first=True,
+                                             norm_first=True),
+            num_layers=n_layers,
+            norm=torch.nn.LayerNorm(latent_size)
+        )
+
+    def forward(self, x):
+        y = x
+        y = self.token_embedding(y)
+        y = y + self.position_embedding(y)
+        y = self.transformer_blocks(y)
+        return y
+
+class TransformerDecoderNetwork(pl.LightningModule):
+    def __init__(self,
+                 num_tokens,
+                 max_length,
+                 latent_size = 64,
+                 num_heads = 4,
+                 n_layers = 8,
+                 **kwargs):
+        super().__init__(**kwargs)
+        self.token_embedding = torch.nn.Embedding(num_tokens,
+                                                  latent_size,
+                                                  padding_idx=0)
+        self.position_embedding = MaskedSinePositionEmbedding()
+        self.transformer_blocks = torch.nn.TransformerDecoder(
+            torch.nn.TransformerDecoderLayer(d_model=latent_size,
+                                             nhead=num_heads,
+                                             dim_feedforward=latent_size*2,
+                                             activation=torch.nn.GELU(),
+                                             batch_first=True,
+                                             norm_first=True),
+            num_layers=n_layers,
+            norm=torch.nn.LayerNorm(latent_size)
+        )
+        self.output_layer = torch.nn.Linear(latent_size,
+                                            num_tokens)
+
+    def make_causal_mask(self, x):
+        return torch.triu(torch.full((x.shape[1], x.shape[1]), float('-inf')), diagonal=1).type_as(x)
+        # Boolean method - no bool input to use for type_as() call though
+        # return torch.triu(torch.full((q.shape[1], k.shape[1]), True), diagonal=1).type_as(?)
+
+    def forward(self, x_enc, x_dec):
+        y = x_dec
+        y = self.token_embedding(y)
+        mask = self.make_causal_mask(y)
+        y = y + self.position_embedding(y)
+        y = self.transformer_blocks(y,
+                                    memory=x_enc,
+                                    tgt_mask=mask,
+                                    tgt_is_causal=True)
+        y = self.output_layer(y)
+        return y
+
+    # Define Trainable Module (Abstract Base Class)
+class EncDecLightningBoilerplate(pl.LightningModule):
+    def __init__(self, **kwargs):
+        # This is the contructor, where we typically make
+        # layer objects using provided arguments.
+        super().__init__(**kwargs) # Call the super class constructor
+
+    def predict_step(self, predict_batch, batch_idx):
+        x_enc, x_dec, y_dec = predict_batch
+        y_pred = self.predict(x_enc, x_dec)
+        return y_pred, y_dec
+
+    def training_step(self, train_batch, batch_idx):
+        x_enc, x_dec, y_dec = train_batch
+        y_pred = self(x_enc, x_dec)
+        perm = (0,-1) + tuple(range(y_pred.ndim))[1:-1]
+        for metric_name, metric_function in self.network_metrics.items():
+            metric_value = metric_function(y_pred.permute(*perm),y_dec)
+            self.log('train_'+metric_name, metric_value, on_step=False, on_epoch=True)
+        loss = self.network_loss(y_pred.permute(*perm),y_dec)
+        self.log('train_loss', loss, on_step=False, on_epoch=True)
+        return loss
+
+    # Validate used for Teacher Forcing
+    def validation_step(self, val_batch, batch_idx):
+        x_enc, x_dec, y_dec = val_batch
+        y_pred = self(x_enc, x_dec)
+        perm = (0,-1) + tuple(range(y_pred.ndim))[1:-1]
+        for metric_name, metric_function in self.network_metrics.items():
+            metric_value = metric_function(y_pred.permute(*perm),y_dec)
+            self.log('val_'+metric_name, metric_value, on_step=False, on_epoch=True)
+        loss = self.network_loss(y_pred.permute(*perm),y_dec)
+        self.log('val_loss', loss, on_step=False, on_epoch=True)
+        return loss
+
+    # Test used for Non-Teacher Forcing
+    def test_step(self, test_batch, batch_idx):
+        x_enc, x_dec, y_dec = test_batch
+        context = self.enc_net(x_enc)
+        tokens = torch.zeros_like(x_dec).long()
+        tokens[:,0] = 1
+        for i in range(y_dec.shape[1]-1):
+            tokens[:,i+1] = self.dec_net(context, tokens).argmax(-1)[:,i]
+        y_pred = self(x_enc, tokens)
+        perm = (0,-1) + tuple(range(y_pred.ndim))[1:-1]
+        for metric_name, metric_function in self.network_metrics.items():
+            metric_value = metric_function(y_pred.permute(*perm),y_dec)
+            self.log('test_'+metric_name, metric_value, on_step=False, on_epoch=True)
+        loss = self.network_loss(y_pred.permute(*perm),y_dec)
+        self.log('test_loss', loss, on_step=False, on_epoch=True)
+        return loss
+
+# Attach loss, metrics, and optimizer
+class EncDecLightningModule(EncDecLightningBoilerplate):
+    def __init__(self,
+                 num_classes,
+                 ignore_index=0,
+                 **kwargs):
+        # This is the contructor, where we typically make
+        # layer objects using provided arguments.
+        super().__init__(**kwargs) # Call the super class constructor
+
+        self.num_classes = num_classes
+
+        # This creates an accuracy function
+        self.network_metrics = torch.nn.ModuleDict({
+            'acc': torchmetrics.classification.Accuracy(task='multiclass',
+                                                        num_classes=num_classes,
+                                                        ignore_index=ignore_index)
+        })
+        # This creates a loss function
+        self.network_loss = torch.nn.CrossEntropyLoss(ignore_index=ignore_index)
+
+    def configure_optimizers(self):
+        optimizer = torch.optim.Adam(self.parameters(), lr=0.001)
+        return optimizer
+
+class TransformerEncDecNetwork(EncDecLightningModule):
+    def __init__(self,
+                 num_enc_tokens,
+                 max_enc_length,
+                 num_dec_tokens,
+                 max_dec_length,
+                 latent_size = 64,
+                 num_heads = 4,
+                 n_layers = 8,
+                 **kwargs):
+        super().__init__(num_classes=num_dec_tokens,
+                         **kwargs)
+        self.save_hyperparameters()
+
+        self.enc_net = TransformerEncoderNetwork(num_enc_tokens,max_enc_length,latent_size,num_heads,n_layers)
+        self.dec_net = TransformerDecoderNetwork(num_dec_tokens,max_dec_length,latent_size,num_heads,n_layers)
+
+    def forward(self, x_enc, x_dec):
+        return self.dec_net(self.enc_net(x_enc), x_dec)
 
 def main():
     parser = argparse.ArgumentParser()
@@ -459,8 +798,9 @@ def main():
     os.environ["WANDB_CONSOLE"] = "off"
     all_acc, all_loss, all_test_acc = [], [], []
 
-    parser.add_argument('--runs', type=int, default=5)
+    parser.add_argument('--runs', type=int, default=10)
     parser.add_argument('--epochs', type=int, default=50)
+    parser.add_argument('--latent_size', type=int, default=64)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--workers', type=int, default=0)
     parser.add_argument('--batch_size', type=int, default=100)
@@ -479,16 +819,28 @@ def main():
         with output_context, error_context:
             pl.seed_everything(args.seed + run, workers=True, verbose=False)
 
-            if PARITY_PROBLEM:
+            if PARITY_PROBLEM and not USE_TRANSFORMER:
                 data_module = ParityDataModule(num_workers=args.workers, batch_size=args.batch_size)
+            elif not PARITY_PROBLEM and USE_TRANSFORMER:
+                data_module = TokenizedTranslationDataModule(num_workers=args.workers, batch_size=args.batch_size)
             else:
                 data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers, batch_size=args.batch_size)
 
             data_module.setup('validate')
 
-            model = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
+            if USE_TRANSFORMER:
+                model = TransformerEncDecNetwork(num_enc_tokens=data_module.src_tokenizer.get_vocab_size(),
+                                                 max_enc_length=data_module.src_timesteps,
+                                                 num_dec_tokens=data_module.dst_tokenizer.get_vocab_size(),
+                                                 max_dec_length=data_module.dst_timesteps,
+                                                 latent_size=args.latent_size,
+                                                 n_layers=args.n_layers)
+            else:
+                model = EncDecNetwork(num_enc_tokens=len(data_module.i_to_c_src),
                                   num_dec_tokens=len(data_module.i_to_c_dst),
                                   n_layers=args.n_layers)
+
+            summary(model)
 
             logger = pl.loggers.CSVLogger(str(run_dir / "logs"), name=f'run-{run + 1:02d}')
             wandb_logger = pl.loggers.WandbLogger(
