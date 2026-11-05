@@ -832,7 +832,7 @@ def main():
 
                 if PARITY_PROBLEM:
                     n_enc, n_dec = len(data_module.i_to_c_src), len(data_module.i_to_c_dst)
-                    max_enc, max_dec = data_module.max_len + 2, data_module.max_len + 1  # src has START+STOP; dec_x has START only
+                    max_enc, max_dec = data_module.max_len + 2, data_module.max_len + 1
                 else:
                     n_enc, n_dec = data_module.src_tokenizer.get_vocab_size(), data_module.dst_tokenizer.get_vocab_size()
                     max_enc, max_dec = data_module.src_timesteps, data_module.dst_timesteps
