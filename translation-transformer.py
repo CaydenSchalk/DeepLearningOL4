@@ -511,12 +511,12 @@ class TokenizedTranslationDataModule(pl.LightningDataModule):
 
             self.src_tokenizer = tokenizers.Tokenizer(tokenizers.models.BPE(unk_token=unknown_token))
             self.src_tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
-            src_token_trainer = tokenizers.trainers.BpeTrainer(vocab_size=100000,special_tokens=special_tokens)
+            src_token_trainer = tokenizers.trainers.BpeTrainer(vocab_size=1200,special_tokens=special_tokens)
             self.src_tokenizer.train_from_iterator(src,src_token_trainer)
 
             self.dst_tokenizer = tokenizers.Tokenizer(tokenizers.models.BPE(unk_token=unknown_token))
             self.dst_tokenizer.pre_tokenizer = tokenizers.pre_tokenizers.Whitespace()
-            dst_token_trainer = tokenizers.trainers.BpeTrainer(vocab_size=100000,special_tokens=special_tokens)
+            dst_token_trainer = tokenizers.trainers.BpeTrainer(vocab_size=1200,special_tokens=special_tokens)
             self.dst_tokenizer.train_from_iterator(dst,dst_token_trainer)
 
             src_recoded = np.array([self.src_tokenizer.decode(self.src_tokenizer.encode(s).ids) for s in src])
@@ -632,7 +632,7 @@ class TransformerEncoderNetwork(pl.LightningModule):
         self.token_embedding = torch.nn.Embedding(num_tokens,
                                                   latent_size,
                                                   padding_idx=0)
-        self.position_embedding = MaskedSinePositionEmbedding()
+        self.position_embedding = MaskedRandomPositionEmbedding(max_length, latent_size)
         self.transformer_blocks = torch.nn.TransformerEncoder(
             torch.nn.TransformerEncoderLayer(d_model=latent_size,
                                              nhead=num_heads,
@@ -663,7 +663,7 @@ class TransformerDecoderNetwork(pl.LightningModule):
         self.token_embedding = torch.nn.Embedding(num_tokens,
                                                   latent_size,
                                                   padding_idx=0)
-        self.position_embedding = MaskedSinePositionEmbedding()
+        self.position_embedding = MaskedRandomPositionEmbedding(max_length, latent_size)
         self.transformer_blocks = torch.nn.TransformerDecoder(
             torch.nn.TransformerDecoderLayer(d_model=latent_size,
                                              nhead=num_heads,
@@ -819,20 +819,26 @@ def main():
         with output_context, error_context:
             pl.seed_everything(args.seed + run, workers=True, verbose=False)
 
-            if PARITY_PROBLEM and not USE_TRANSFORMER:
+            if PARITY_PROBLEM:
                 data_module = ParityDataModule(num_workers=args.workers, batch_size=args.batch_size)
-            elif not PARITY_PROBLEM and USE_TRANSFORMER:
-                data_module = TokenizedTranslationDataModule(num_workers=args.workers, batch_size=args.batch_size)
+            elif USE_TRANSFORMER:
+                data_module = TokenizedTranslationDataModule(n_sequences=None, num_workers=args.workers, batch_size=args.batch_size)
             else:
                 data_module = CharacterTranslationDataModule(n_sequences=None, num_workers=args.workers, batch_size=args.batch_size)
 
             data_module.setup('validate')
 
             if USE_TRANSFORMER:
-                model = TransformerEncDecNetwork(num_enc_tokens=data_module.src_tokenizer.get_vocab_size(),
-                                                 max_enc_length=data_module.src_timesteps,
-                                                 num_dec_tokens=data_module.dst_tokenizer.get_vocab_size(),
-                                                 max_dec_length=data_module.dst_timesteps,
+
+                if PARITY_PROBLEM:
+                    n_enc, n_dec = len(data_module.i_to_c_src), len(data_module.i_to_c_dst)
+                    max_enc, max_dec = data_module.max_len + 2, data_module.max_len + 1  # src has START+STOP; dec_x has START only
+                else:
+                    n_enc, n_dec = data_module.src_tokenizer.get_vocab_size(), data_module.dst_tokenizer.get_vocab_size()
+                    max_enc, max_dec = data_module.src_timesteps, data_module.dst_timesteps
+
+                model = TransformerEncDecNetwork(num_enc_tokens=n_enc, max_enc_length=max_enc,
+                                                 num_dec_tokens=n_dec, max_dec_length=max_dec,
                                                  latent_size=args.latent_size,
                                                  n_layers=args.n_layers)
             else:
