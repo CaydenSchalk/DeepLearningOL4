@@ -4,7 +4,7 @@
 
 **Outcome/decision**: Used the parameter formulas as a reference to see what I needed to tweak exactly.
 
-**Evidence**: "Assistant gives param formulas: 'f = (P_target - (4*Le + 8*Ld)*d^2 - (9*Le + 15*Ld + 4)*d) / ((2*d + 1)*(Le + Ld))'"
+**Evidence**: "Assistant gives param formulas: 'f = (P_target - (4*L_e + 8*L_d) ... / ((2*d + 1)*(L_e + L_d))'"
 
 > Excerpt:
 >
