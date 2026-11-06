@@ -62,7 +62,7 @@
 >
 > User: my validation accuracy isn't improving very much in the eng-por problem over the lstm when i use the transformer, anything common I should look for?
 >
-> Assistant: Yes. English Portuguese translation is a much different problem from parity, and there are several common reasons a Transformer might converge faster without producing much better validation accuracy than an LSTM.
+> Assistant: Yes. English → Portuguese translation is a much different problem from parity, and there are several common reasons a Transformer might converge faster without producing much better validation accuracy than an LSTM.
 > My first suspects would be masking, positional encoding, learning-rate scheduling, and dataset size.
 
 ---
