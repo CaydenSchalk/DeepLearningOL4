@@ -1,113 +1,100 @@
-**[W-1]** Learning differences between RNN and LSTM memory
+**[D-OD-1]** Getting how to calculate the parameter count to compare to previous model
 
-**Why it matters**: Needed to understand the differences between a standard RNN and an LSTM
+**Why it matters**: Needed to know how PyTorch calculates Transformer parameters so I could configure it to match my lstm model's parameter count
 
-**Outcome/decision**: Learned how LSTMs use gates and a separate cell state to keep gradients from farther sequences flowing.
+**Outcome/decision**: Used the parameter formulas for the encoder, decoder, and LayerNorms, solving for dim_feedforward to hit the exact target size.
 
-**Evidence**: "Assistant explains core difference: 'Vanilla RNN: Maintains a single hidden state, which is repeatedly overwritten as new words arrive. Earlier information can become difficult to preserve or learn from ... LSTM: Maintains a separate cell state (long-term memory) and uses learned gates to decide what to keep, forget, and expose."
+**Evidence**: "Assistant provides parameter formulas and solving script: 'f = (P_target - (4*Le + 8*Ld)*d^2 - (9*Le + 15*Ld + 4)*d) / ((2*d + 1)*(Le + Ld))'"
 
 > Excerpt:
 >
-> User: What exactly is the difference between an RNN and LSTM?
+> User: what are the calculations for the parameter count of a standard transformer model in pytorch? i need to tweak it to match a previous model
 >
-> Assistant: The fundamental difference between an RNN (Recurrent Neural Network) and an LSTM (Long Short-Term Memory) is how they store, update, and forget information over time.
-> An LSTM is actually a special type of RNN, designed to solve one of the biggest problems with traditional RNNs: difficulty learning long-term dependencies.
+> Assistant: For a standard PyTorch Transformer, parameter count is primarily determined by four things:
+> d_model: hidden/embedding dimension
+> dim_feedforward: feed-forward network width
+> num_encoder_layers and num_decoder_layers: Transformer depth
+> Whether you include token embeddings, output projections, biases, and final LayerNorms
 
 ---
 
-**[FR-2]** Fixing shape mismatch on LSTM dims
+**[D-DJ-2]** Keeping nhead fixed while tuning feedforward width
 
-**Why it matters**: Switching from an RNN to an LSTM in the translation model caused a shape mismatch error that wouldn't allow execution.
+**Why it matters**: Needed to decide which hyperparameter to change to match model sizes without messing up the attention structure.
 
-**Outcome/decision**: Ended up fixing the error and was able to continue execution.
+**Outcome/decision**: Decided to adjust dim_feedforward instead of nhead, since nhead just splits the existing d_model dimensions and does not change the parameter count.
 
-**Evidence**: "Assistant clarifies dimension error: 'No a unidirectional LSTM does not require a larger hidden dimension than an RNN. If both have hidden_size = 64, both produce outputs with 64 features.'"
+**Evidence**: "Assistant says: 'The interesting part is that nhead does not directly change parameter count, provided d_model stays fixed. It changes how the attention dimensions are partitioned, not the total size of the projection matrices.'"
 
 > Excerpt:
 >
-> User: Compared to the RNN layer, I'm getting a runtime error:
-> RuntimeError: The size of tensor a (64) must match the size of tensor b (128) at non-singleton dimension 2
-> On the eng->por problem, where should I look? Is it because the LSTM requires a larger dimension, or the opposite? The LSTM is not bi-directional.
->
-> Assistant: No a unidirectional LSTM does not require a larger hidden dimension than an RNN. If both have hidden_size = 64, both produce outputs with 64 features.
-> Your error:
-> RuntimeError: The size of tensor a (64) must match the size of tensor b (128) at non-singleton dimension 2
-> strongly suggests that two tensors with different feature dimensions are being combined somewhere in your encoder-decoder architecture.
+> Assistant: The interesting part is that nhead does not directly change parameter count, provided d_model stays fixed. It changes how the attention dimensions are partitioned, not the total size of the projection matrices.
 
 ---
 
-**[D-OD-3]** Finding custom change ideas for parity problem
+**[W-CV-3]** Verifying why Transformer trains faster on parity
 
-**Why it matters**: Needed ideas for the custom component of the assignment, specifically on the parity problem.
+**Why it matters**: The assistant made conceptual claims about why Transformers optimize parity faster than LSTMs, which I needed to verify for the report discussion.
 
-**Outcome/decision**: Identified the option I ended up going with, that being an auxiliary task for the encoder.
+**Outcome/decision**: Confirmed the theoretical claim that attention provides shorter dependency paths and fits fixed-length count representations rather than sequential toggling, citing it in the reflection.
 
-**Evidence**: "Assistant suggests: '1. Auxiliary prefix-parity prediction head: Makes the encoder learn parity at every time step instead of only receiving supervision at the end. 2. Learnable parity-gated memory cell: Builds the idea of retaining or flipping state into the architecture.'"
+**Evidence**: "Assistant explains optimization difference: 'An LSTM has to learn to maintain and update a parity state sequentially, whereas a Transformer can use attention and parallel representations to learn a different computation of parity.'"
 
 > Excerpt:
 >
-> User: I need to use an encoder/decoder architecture to work on the parity problem. I already have an architecture mapped out, but are there any custom improvements I should use that would help?
+> User: why does a transformer do so much better than an lstm on the parity problem?
 >
-> Assistant: This suggests two especially promising custom components:
-> 1. Auxiliary prefix-parity prediction head: Makes the encoder learn parity at every time step instead of only receiving supervision at the end.
-> 2. Learnable parity-gated memory cell: Builds the idea of retaining or flipping state into the architecture.
+> Assistant: The main distinction is:
+> An LSTM has to learn to maintain and update a parity state sequentially, whereas a Transformer can use attention and parallel representations to learn a different computation of parity.
+> But there's a subtle catch: being better at fitting parity examples doesn't necessarily mean the Transformer has learned the underlying XOR algorithm.
 
 ---
 
-**[D-DJ-4]** Decided to pick the prefix head over the memory cell
+**[C-FR-4]** Troubleshooting low validation accuracy on translation
 
-**Why it matters**: Needed to pick a good custom component without rewriting the entire architecture, in order to not change too much.
+**Why it matters**: The Transformer converged quickly during training but validation accuracy was barely improving over the LSTM baseline on English-Portuguese.
 
-**Outcome/decision**: Ended up for sure selecting the auxiliary task for the encoder.
+**Outcome/decision**: Diagnosed that the decoder was missing causal target masks and shifted input targets, and corrected the training step implementation to fix the validation failure.
 
-**Evidence**: "Assistant explains justification: 'It requires relatively few additional parameters, preserves your encoder–decoder structure, and directly targets the problem of retaining parity information across time.'"
+**Evidence**: "Assistant identifies common failure modes: 'My first suspects would be masking, positional encoding, learning-rate scheduling, and dataset size.'"
 
 > Excerpt:
 >
-> Assistant: Why I like this solution: It requires relatively few additional parameters, preserves your encoder-decoder structure, and directly targets the problem of retaining parity information across time.
+> User: my validation accuracy isn't improving very much in the eng-por problem over the lstm when i use the transformer, anything common I should look for?
+>
+> Assistant: Yes. English Portuguese translation is a much different problem from parity, and there are several common reasons a Transformer might converge faster without producing much better validation accuracy than an LSTM.
+> My first suspects would be masking, positional encoding, learning-rate scheduling, and dataset size.
 
 ---
 
-**[D-EC-5]** Masking padding in aux loss calculation
+**[C-CE-5]** Clarifying vocabulary parameter count
 
-**Why it matters**: Variable-length sequences have padding tokens that would give false targets, they also have specific token values such as <START> and <STOP>, so those need to be masked out.
+**Why it matters**: Needed to know how switching between character-level and word-level tokenizers affects the parameters of a transformer
 
-**Outcome/decision**: Added a float length mask to the binary-cross entropy
+**Outcome/decision**: Clarified that word-level tokenization spends most parameters on embedding tables, while character-level shifts the budget almost entirely to attention layers.
 
-**Evidence**: "Assistant provides masking code: 'First: If you're using padded variable-length sequences, mask the auxiliary loss so padding positions don't contribute'"
+**Evidence**: "Assistant clarifies tokenizer parameter split: 'Word-level tokenization: Large vocabulary, short sequences. More parameters are spent on embeddings and the output classifier. Character-level tokenization: Small vocabulary, long sequences.'"
 
 > Excerpt:
 >
-> Assistant: First: If you're using padded variable-length sequences, mask the auxiliary loss so padding positions don't contribute:
-> 
-> per_token_loss = F.binary_cross_entropy_with_logits(
->     prefix_logits,
->     prefix_targets,
->     reduction="none"
-> )
-> # lengths: [batch], number of real bits per sequence
-> mask = (
->     torch.arange(x.size(1), device=x.device)[None, :]
->     < lengths[:, None]
-> )
-> aux_loss = (
->     (per_token_loss * mask).sum()
->     / mask.sum().clamp_min(1)
-> )
+> User: i have 2 tokenization techniques, one is character-level while the other is word level, how does that affect the transformer's parameter budget compared to an lstm, and should i adjust the number of heads, d_model, or anything else? latent_size maybe?
+>
+> Assistant: The key distinction is:
+> Word-level tokenization: Large vocabulary, short sequences. More parameters are spent on embeddings and the output classifier.
+> Character-level tokenization: Small vocabulary, long sequences. Fewer embedding parameters, but substantially more computation is required to process each sentence.
 
 ---
 
-**[W-6]** Explaining why LSTM performed worse on the parity problem
+**[D-EC-6]** Empirical calibration of quadratic character-level compute cost
 
-**Why it matters**: Needed to understand why the RNN performed better on the parity problem than the LSTM when both had about the same param count.
+**Why it matters**: I expected character-level tokenization to be lighter because of the tiny embedding table, but training was significantly slower and heavier.
 
-**Outdome/decision**: Learned that under equal params, simple RNNs have larger hidden sizes, and LSTM gating was built for selective retention.
+**Outcome/decision**: Connected the empirical slowdown back to the O(T^2 * d) attention scaling over 5x longer sequences, adjusting batch size so it would run within compute limits.
 
-**Evidence**: "Assistant explains: 'The most likely explanation is that parity requires learning an exact state-transition rule, whereas LSTMs are primarily designed to make selective memory retention easier'"
+**Evidence**: "Assistant warns about quadratic compute cost: 'If character tokenization increases sequence length by a factor of 5, the quadratic attention component can require roughly 25 times as much computation, at unchanged width.'"
 
 > Excerpt:
 >
-> User: On the parity problem, the LSTM did fairly worse than the simple RNN with about the same parameters. Why could that be?
->
-> Assistant: That's a particularly interesting result, and it's entirely plausible for an LSTM to perform significantly worse than a simple RNN on the parity problem, even when both have approximately the same number of parameters.
-> The most likely explanation is that parity requires learning an exact state-transition rule, whereas LSTMs are primarily designed to make selective memory retention easier.
+> Assistant: For dense self-attention, the attention-score computation grows approximately as:
+> O(T^2 * d)
+> If character tokenization increases sequence length by a factor of 5, the quadratic attention component can require roughly 25 times as much computation, at unchanged width. Cross-attention similarly scales with source length times target length.
