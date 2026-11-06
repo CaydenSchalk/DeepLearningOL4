@@ -1,10 +1,10 @@
 **[D-OD-1]** Getting how to calculate the parameter count to compare to previous model
 
-**Why it matters**: Needed to know how PyTorch calculates Transformer parameters so I could configure it to match my lstm model's parameter count
+**Why it matters**: Needed to know how PyTorch gets transformer parameters so I could change it to match my lstm model's parameter count.
 
-**Outcome/decision**: Used the parameter formulas for the encoder, decoder, and LayerNorms, solving for dim_feedforward to hit the exact target size.
+**Outcome/decision**: Used the parameter formulas as a reference to see what I needed to tweak exactly.
 
-**Evidence**: "Assistant provides parameter formulas and solving script: 'f = (P_target - (4*Le + 8*Ld)*d^2 - (9*Le + 15*Ld + 4)*d) / ((2*d + 1)*(Le + Ld))'"
+**Evidence**: "Assistant gives param formulas: 'f = (P_target - (4*Le + 8*Ld)*d^2 - (9*Le + 15*Ld + 4)*d) / ((2*d + 1)*(Le + Ld))'"
 
 > Excerpt:
 >
@@ -18,11 +18,11 @@
 
 ---
 
-**[D-DJ-2]** Keeping nhead fixed while tuning feedforward width
+**[D-DJ-2]** Tuning model and noting not to change
 
-**Why it matters**: Needed to decide which hyperparameter to change to match model sizes without messing up the attention structure.
+**Why it matters**: Needed to decide which hyperparameter to change to match model sizes without messing up the model entirely.
 
-**Outcome/decision**: Decided to adjust dim_feedforward instead of nhead, since nhead just splits the existing d_model dimensions and does not change the parameter count.
+**Outcome/decision**: Left n_head alone and d_model as well and dim_feedforward. I matched the LSTM's parameter count by changing layer counts and the vocab size.
 
 **Evidence**: "Assistant says: 'The interesting part is that nhead does not directly change parameter count, provided d_model stays fixed. It changes how the attention dimensions are partitioned, not the total size of the projection matrices.'"
 
@@ -32,13 +32,13 @@
 
 ---
 
-**[W-CV-3]** Verifying why Transformer trains faster on parity
+**[W-CV-3]** Seeing why Transformer trains faster/better on the parity problem
 
-**Why it matters**: The assistant made conceptual claims about why Transformers optimize parity faster than LSTMs, which I needed to verify for the report discussion.
+**Why it matters**: I wanted to understand why exactly the transformer had an easier time on the parity problem.
 
-**Outcome/decision**: Confirmed the theoretical claim that attention provides shorter dependency paths and fits fixed-length count representations rather than sequential toggling, citing it in the reflection.
+**Outcome/decision**: I now understand why the transformer excels at the task, due to the transformer being able to use self-attention.
 
-**Evidence**: "Assistant explains optimization difference: 'An LSTM has to learn to maintain and update a parity state sequentially, whereas a Transformer can use attention and parallel representations to learn a different computation of parity.'"
+**Evidence**: "Assistant explains difference: 'An LSTM has to learn to maintain and update a parity state sequentially, whereas a Transformer can use attention and parallel representations to learn a different computation of parity.'"
 
 > Excerpt:
 >
@@ -50,13 +50,13 @@
 
 ---
 
-**[C-FR-4]** Troubleshooting low validation accuracy on translation
+**[C-FR-4]** Troubleshooting low validation accuracy on the translation problem
 
-**Why it matters**: The Transformer converged quickly during training but validation accuracy was barely improving over the LSTM baseline on English-Portuguese.
+**Why it matters**: The transformer wasn't training very well at all, but training was really fast.
 
-**Outcome/decision**: Diagnosed that the decoder was missing causal target masks and shifted input targets, and corrected the training step implementation to fix the validation failure.
+**Outcome/decision**: After noting the AI said dataset size, I passed n_sequences = None in order to use the entire dataset.
 
-**Evidence**: "Assistant identifies common failure modes: 'My first suspects would be masking, positional encoding, learning-rate scheduling, and dataset size.'"
+**Evidence**: "Assistant says: 'My first suspects would be masking, positional encoding, learning-rate scheduling, and dataset size.'"
 
 > Excerpt:
 >
@@ -67,13 +67,13 @@
 
 ---
 
-**[C-CE-5]** Clarifying vocabulary parameter count
+**[C-CE-5]** Learning more about vocabulary parameter count
 
-**Why it matters**: Needed to know how switching between character-level and word-level tokenizers affects the parameters of a transformer
+**Why it matters**: Wanted to know how switching between character-level and word-level tokenizers affects the parameters of a transformer
 
-**Outcome/decision**: Clarified that word-level tokenization spends most parameters on embedding tables, while character-level shifts the budget almost entirely to attention layers.
+**Outcome/decision**: Understood that word-level tokenization spends most parameters on embeddings.
 
-**Evidence**: "Assistant clarifies tokenizer parameter split: 'Word-level tokenization: Large vocabulary, short sequences. More parameters are spent on embeddings and the output classifier. Character-level tokenization: Small vocabulary, long sequences.'"
+**Evidence**: "Assistant says: 'Word-level tokenization: Large vocabulary, short sequences. More parameters are spent on embeddings and the output classifier. Character-level tokenization: Small vocabulary, long sequences.'"
 
 > Excerpt:
 >
@@ -85,13 +85,13 @@
 
 ---
 
-**[D-EC-6]** Empirical calibration of quadratic character-level compute cost
+**[D-DJ-6]** Choosing word-level tokenization instead of character-level tokenization
 
-**Why it matters**: I expected character-level tokenization to be lighter because of the tiny embedding table, but training was significantly slower and heavier.
+**Why it matters**: The sequence grows a lot longer with character-level tokenization over word-level
 
-**Outcome/decision**: Connected the empirical slowdown back to the O(T^2 * d) attention scaling over 5x longer sequences, adjusting batch size so it would run within compute limits.
+**Outcome/decision**: Kept the word-level tokenization obtained from the example code in the Transformers module lesson
 
-**Evidence**: "Assistant warns about quadratic compute cost: 'If character tokenization increases sequence length by a factor of 5, the quadratic attention component can require roughly 25 times as much computation, at unchanged width.'"
+**Evidence**: "Assistant talks about costs: 'If character tokenization increases sequence length by a factor of 5, the quadratic attention component can require roughly 25 times as much computation, at unchanged width.'"
 
 > Excerpt:
 >
