@@ -22,7 +22,7 @@
 
 **Why it matters**: Needed to decide which hyperparameter to change to match model sizes without messing up the model entirely.
 
-**Outcome/decision**: Left n_head alone and d_model as well and dim_feedforward. I matched the LSTM's parameter count by changing layer counts and the vocab size.
+**Outcome/decision**: Left n_head alone and d_model as well and dim_feedforward. I matched as close as possible to the LSTM's parameter count by changing layer counts and the vocab size.
 
 **Evidence**: "Assistant says: 'The interesting part is that nhead does not directly change parameter count, provided d_model stays fixed. It changes how the attention dimensions are partitioned, not the total size of the projection matrices.'"
 
@@ -36,7 +36,7 @@
 
 **Why it matters**: I wanted to understand why exactly the transformer had an easier time on the parity problem.
 
-**Outcome/decision**: I now understand why the transformer excels at the task, due to the transformer being able to use self-attention.
+**Outcome/decision**: I now understand why the transformer excels at the task, due to the transformer being able to use self-attention and not having to keep track of state like a RNN or LSTM.
 
 **Evidence**: "Assistant explains difference: 'An LSTM has to learn to maintain and update a parity state sequentially, whereas a Transformer can use attention and parallel representations to learn a different computation of parity.'"
 
@@ -71,7 +71,7 @@
 
 **Why it matters**: Wanted to know how switching between character-level and word-level tokenizers affects the parameters of a transformer
 
-**Outcome/decision**: Understood that word-level tokenization spends most parameters on embeddings.
+**Outcome/decision**: Understood that word-level tokenization spends more parameters on embeddings.
 
 **Evidence**: "Assistant says: 'Word-level tokenization: Large vocabulary, short sequences. More parameters are spent on embeddings and the output classifier. Character-level tokenization: Small vocabulary, long sequences.'"
 
